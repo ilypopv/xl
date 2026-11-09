@@ -12,7 +12,10 @@
             maxPart: 256 * 1024 ** 2,
             maxSheet: 1.5 * 1024 ** 3,
             ratio: 1000,
-            ratioMin: 256 * 1024 ** 2
+            ratioMin: 256 * 1024 ** 2,
+            lazySst: 2 * 1024 ** 2,
+            sstChunk: 65536,
+            nativeInflate: 1024 ** 2
         },
         OX.zipLimits
     );
@@ -1141,23 +1144,178 @@
         const cache = new Array(n);
         return {
             length: n,
+            has: i => i >= 0 && i < n,
             get(i) {
                 let v = cache[i];
                 if (v !== undefined) return v;
                 if (!(i >= 0 && i < n)) return '';
                 const a = st[i],
                     b = en[i];
-                if (a === b) v = '';
-                else if (
-                    x.charCodeAt(a) === 60 &&
-                    x.charCodeAt(a + 1) === 116 &&
-                    x.charCodeAt(a + 2) === 62 &&
-                    x.indexOf('</t>', a + 3) === b - 4 &&
-                    x.indexOf('<', a + 3) === b - 4
-                )
-                    v = decodeStr(x.substring(a + 3, b - 4));
-                else v = siText(x.substring(a, b));
+                v = sstValue(x, a, b);
                 return (cache[i] = v);
+            }
+        };
+    }
+
+    function sstValue(x, a, b) {
+        if (a === b) return '';
+        if (
+            x.charCodeAt(a) === 60 &&
+            x.charCodeAt(a + 1) === 116 &&
+            x.charCodeAt(a + 2) === 62 &&
+            x.indexOf('</t>', a + 3) === b - 4 &&
+            x.indexOf('<', a + 3) === b - 4
+        )
+            return decodeStr(x.substring(a + 3, b - 4));
+        return siText(x.substring(a, b));
+    }
+
+    // Same contract as makeSst, but the raw-deflate payload is inflated and indexed on demand, only as far as the
+    // highest string id asked for, so a huge sharedStrings part no longer delays the first paint.
+    // Returns null when the part is not a plain unprefixed <sst> (the caller then takes the eager path).
+    function makeLazySst(data, L, fl) {
+        const td = new TextDecoder('utf-8');
+        const chunks = [];
+        let n = 0,
+            carry = '',
+            pos = 0,
+            got = 0,
+            done = false,
+            failed = null,
+            parts = [],
+            probed = false,
+            prefixed = false;
+        const inf = new fl.Inflate(c => {
+            got += c.length;
+            if (got > L.maxPart || (got > L.ratioMin && got > L.ratio * Math.max(1, pos))) throw bombErr();
+            if (c.length) parts.push(td.decode(c, { stream: true }));
+        });
+        function index(text, final) {
+            const st = [],
+                en = [];
+            const len = text.length;
+            let p = 0,
+                keep = len;
+            for (;;) {
+                const q = text.indexOf('<si', p);
+                if (q < 0) {
+                    keep = Math.max(p, len - 2);
+                    break;
+                }
+                if (q + 3 >= len) {
+                    keep = q;
+                    break;
+                }
+                const c = text.charCodeAt(q + 3);
+                if (!(c === 62 || c === 32 || c === 47)) {
+                    p = q + 3;
+                    continue;
+                }
+                const te = text.indexOf('>', q);
+                if (te < 0) {
+                    keep = q;
+                    break;
+                }
+                if (text.charCodeAt(te - 1) === 47) {
+                    st.push(0);
+                    en.push(0);
+                    p = te + 1;
+                    continue;
+                }
+                const ce = text.indexOf('</si>', te + 1);
+                if (ce < 0) {
+                    if (final) {
+                        st.push(te + 1);
+                        en.push(len);
+                        keep = len;
+                    } else keep = q;
+                    break;
+                }
+                st.push(te + 1);
+                en.push(ce);
+                p = ce + 5;
+            }
+            carry = final ? '' : text.substring(keep);
+            if (st.length) {
+                chunks.push({ text, first: n, st: Int32Array.from(st), en: Int32Array.from(en), cache: null });
+                n += st.length;
+            }
+        }
+        function probe(text, last) {
+            // prep() strips a namespace prefix decided by the first element only
+            let q = 0;
+            for (;;) {
+                q = text.indexOf('<', q);
+                if (q < 0) return last;
+                const c = text.charCodeAt(q + 1);
+                if (c === 63 || c === 33) {
+                    q++;
+                    continue;
+                }
+                let e = q + 1;
+                while (e < text.length) {
+                    const d = text.charCodeAt(e);
+                    if (d === 32 || d === 62 || d === 47 || d === 9 || d === 10 || d === 13) break;
+                    e++;
+                }
+                if (e >= text.length && !last) return false;
+                prefixed = text.substring(q + 1, e).indexOf(':') >= 0;
+                return true;
+            }
+        }
+        function step() {
+            if (failed) throw failed;
+            if (done) return;
+            try {
+                const from = pos,
+                    end = Math.min(data.length, pos + L.sstChunk),
+                    last = end >= data.length;
+                pos = end;
+                parts = [];
+                inf.push(data.subarray(from, end), last);
+                if (last) parts.push(td.decode());
+                const text = carry + parts.join('');
+                parts = [];
+                if (!probed) probed = probe(text, last);
+                if (prefixed) {
+                    done = true;
+                    return;
+                }
+                index(text, last);
+                if (last) done = true;
+            } catch (e) {
+                failed = e;
+                done = true;
+                throw e;
+            }
+        }
+        while (!probed && !done) step();
+        if (prefixed) return null;
+        return {
+            get length() {
+                while (!done) step();
+                return n;
+            },
+            has(i) {
+                if (!(i >= 0)) return false;
+                while (i >= n && !done) step();
+                return i < n;
+            },
+            get(i) {
+                if (!(i >= 0 && i < n)) return '';
+                let lo = 0,
+                    hi = chunks.length - 1;
+                while (lo < hi) {
+                    const mid = (lo + hi + 1) >> 1;
+                    if (chunks[mid].first <= i) lo = mid;
+                    else hi = mid - 1;
+                }
+                const ch = chunks[lo],
+                    k = i - ch.first;
+                if (ch.cache === null) ch.cache = new Array(ch.st.length);
+                let v = ch.cache[k];
+                if (v === undefined) v = ch.cache[k] = sstValue(ch.text, ch.st[k], ch.en[k]);
+                return v;
             }
         };
     }
@@ -1602,7 +1760,7 @@
                                     idx = idx * 10 + d;
                                 }
                                 if (!ok) idx = parseInt(s.substring(vS, vE), 10);
-                                if (idx >= 0 && idx < sst.length) {
+                                if (sst.has(idx)) {
                                     tcode = 1;
                                     val = idx;
                                 } else {
@@ -2224,7 +2382,7 @@
         const themePath = relOfType(wbRels, '/theme') || 'xl/theme/theme1.xml';
         let meta;
         try {
-            meta = unzip([sstPath, stylesPath, themePath]);
+            meta = unzip([stylesPath, themePath]);
         } catch (e) {
             throw e && e.code === 'ZIPBOMB' ? e : bad();
         }
@@ -2249,8 +2407,26 @@
         const resolve = makeColorResolver(theme, indexedCustom);
         const ps = parseStyles(stylesXml, resolve);
 
-        const sstXml = get(meta, sstPath);
-        const sst = makeSst(sstXml ? prep(sstXml) : '');
+        let sst = null;
+        const sstEnt = zipDir().get(sstPath.toLowerCase().replace(/\\/g, '/'));
+        if (
+            sstEnt &&
+            sstEnt.method === 8 &&
+            sstEnt.de > sstEnt.ds &&
+            sstEnt.us >= L.lazySst &&
+            sstEnt.us <= L.maxPart &&
+            typeof TextDecoder !== 'undefined'
+        )
+            sst = makeLazySst(bytes.subarray(sstEnt.ds, sstEnt.de), L, fl);
+        if (!sst) {
+            let sstXml;
+            try {
+                sstXml = get(unzip([sstPath]), sstPath);
+            } catch (e) {
+                throw e && e.code === 'ZIPBOMB' ? e : bad();
+            }
+            sst = makeSst(sstXml ? prep(sstXml) : '');
+        }
 
         const sheets = [];
         const sheetRels = [];
@@ -2312,7 +2488,8 @@
         }
 
         // prepare a sheet load: { sheet } when nothing to stream, else { sheet (live), step(maxBytes)->done, pos, total, finish() }
-        function begin(i) {
+        // native: the async job loop may take a stepAsync() source (inflate runs off the main thread)
+        function begin(i, native) {
             const info = sheets[i];
             if (!info) throw new Error('No such sheet: ' + i);
             const rel = sheetRels[i];
@@ -2364,6 +2541,46 @@
                 };
             }
             const dec = new TextDecoder('utf-8');
+            if (
+                native &&
+                ent.method === 8 &&
+                ent.de - ent.ds >= L.nativeInflate &&
+                typeof DecompressionStream === 'function' &&
+                typeof Blob === 'function'
+            ) {
+                const csize = ent.de - ent.ds;
+                let reader = null,
+                    nGot = 0,
+                    fin = false;
+                return {
+                    sheet: sh,
+                    total: csize,
+                    // compressed offset is unknown on a native stream: estimate it from the declared output size
+                    pos: () =>
+                        fin ? csize : ent.us > 0 ? Math.min(csize - 1, Math.floor((csize * nGot) / ent.us)) : 0,
+                    async stepAsync() {
+                        if (reader === null)
+                            reader = new Blob([bytes.subarray(ent.ds, ent.de)])
+                                .stream()
+                                .pipeThrough(new DecompressionStream('deflate-raw'))
+                                .getReader();
+                        const r = await reader.read();
+                        if (r.done) {
+                            fin = true;
+                            parser.feed(dec.decode(), true);
+                            return true;
+                        }
+                        nGot += r.value.length;
+                        if (nGot > L.maxSheet || (nGot > L.ratioMin && nGot > L.ratio * csize)) throw bombErr();
+                        parser.feed(dec.decode(r.value, { stream: true }), false);
+                        return false;
+                    },
+                    cancel() {
+                        if (reader !== null) reader.cancel().catch(() => undefined);
+                    },
+                    finish
+                };
+            }
             let off = ent.ds;
             let got = 0;
             const inf =
@@ -2408,9 +2625,10 @@
                     }
             };
             (async () => {
+                let b = null;
                 try {
-                    const b = begin(i);
-                    if (!b.step) {
+                    b = begin(i, true);
+                    if (!b.step && !b.stepAsync) {
                         cache.set(i, b.sheet);
                         jobs.delete(i);
                         job.result = { sheet: b.sheet };
@@ -2420,7 +2638,7 @@
                     let t0 = now(),
                         budget = 12;
                     for (;;) {
-                        if (b.step(32768)) break;
+                        if (b.stepAsync ? await b.stepAsync() : b.step(32768)) break;
                         if (now() - t0 > budget) {
                             emit({
                                 sheet: b.sheet,
@@ -2433,6 +2651,7 @@
                             await yieldNow();
                             if (!job.subs.length) {
                                 jobs.delete(i);
+                                if (b.cancel) b.cancel();
                                 return;
                             }
                             t0 = now();
@@ -2463,6 +2682,7 @@
                         s.resolve(sh);
                     }
                 } catch (err) {
+                    if (b && b.cancel) b.cancel();
                     jobs.delete(i);
                     job.result = { err };
                     const subs = job.subs.slice();
