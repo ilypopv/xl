@@ -62,6 +62,9 @@ export default class ExcelDocumentView extends BaseDocumentView {
         return {
             customEditor: this.hasCustomEditor,
             uri: this.uri.toString(),
+            editScript: `${this.scriptUri}/excel-edit.js`,
+            // a clean, non-restored local file is fetched by the webview straight from disk (no host round trip)
+            directUrl: this._direct && !this._document.dirty ? this.previewUri.toString() : undefined,
             previewUri: this.previewUri.toString(),
             state: this.state
         };
@@ -71,8 +74,14 @@ export default class ExcelDocumentView extends BaseDocumentView {
     private _requestId = 0;
     private readonly _pending = new Map<number, { resolve: (b: Uint8Array) => void; reject: (e: Error) => void }>();
 
+    private _direct = false;
+
     public enableEditing(document: ExcelDocument) {
         this._document = document;
+        if (document.uri.scheme === 'file' && !document.restored && !document.dirty) {
+            this._direct = true;
+            this.allowLocalRoots([Utils.dirname(document.uri)]);
+        }
         this.webview.onDidReceiveMessage(
             e => {
                 if (!e || typeof e !== 'object') {
@@ -180,10 +189,17 @@ export default class ExcelDocumentView extends BaseDocumentView {
     refresh(): void {
         // A custom editor shows the document model (this is what restores hot-exit backups); previews read the disk.
         if (this._document) {
-            this.webview.postMessage({
-                refresh: true,
-                content: this._document.documentData
-            });
+            const doc = this._document;
+            doc.ready.then(
+                () => {
+                    if (!this._disposed) {
+                        this.webview.postMessage({ refresh: true, content: doc.documentData });
+                    }
+                },
+                reason => {
+                    window.showErrorMessage(String((reason && reason.message) || reason));
+                }
+            );
             return;
         }
         workspace.fs.readFile(this.uri).then(
@@ -221,21 +237,10 @@ export default class ExcelDocumentView extends BaseDocumentView {
         <html>
         <head>
         <meta http-equiv="Content-Security-Policy" content="${csp(this.webview.cspSource, nonce)}">
-            <link href="${s}/core/grid.css" rel="stylesheet" type="text/css" />
-            <link href="${s}/styles/vscode.css" rel="stylesheet" type="text/css" />
+            <link href="${s}/style.css" rel="stylesheet" type="text/css" />
         </head>
         <body>
             <div id="app"></div>
-            <script nonce="${nonce}" src="${s}/vendor/fflate.js"></script>
-            <script nonce="${nonce}" src="${s}/vendor/ssf.js"></script>
-            <script nonce="${nonce}" src="${s}/core/format.js"></script>
-            <script nonce="${nonce}" src="${s}/core/xlsx-reader.js"></script>
-            <script nonce="${nonce}" src="${s}/core/xlsx-writer.js"></script>
-            <script nonce="${nonce}" src="${s}/core/xlsx-provider.js"></script>
-            <script nonce="${nonce}" src="${s}/core/calc.js"></script>
-            <script nonce="${nonce}" src="${s}/core/grid-core.js"></script>
-            <script nonce="${nonce}" src="${s}/core/grid.js"></script>
-            <script nonce="${nonce}" src="${s}/core/app-shell.js"></script>
             <script nonce="${nonce}" src="${s}/excel.js"></script>
             <script nonce="${nonce}" type="text/javascript">
                 function ignoreState() {
