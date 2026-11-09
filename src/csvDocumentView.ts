@@ -339,17 +339,10 @@ export default class CsvDocumentView extends BaseDocumentView {
         <html>
         <head>
         <meta http-equiv="Content-Security-Policy" content="${csp(this.webview.cspSource, nonce)}">
-            <link href="${s}/core/grid.css" rel="stylesheet" type="text/css" />
-            <link href="${s}/styles/vscode.css" rel="stylesheet" type="text/css" />
+            <link href="${s}/style.css" rel="stylesheet" type="text/css" />
         </head>
         <body>
             <div id="app"></div>
-            <script nonce="${nonce}" src="${s}/core/format.js"></script>
-            <script nonce="${nonce}" src="${s}/core/csv-parser.js"></script>
-            <script nonce="${nonce}" src="${s}/core/csv-provider.js"></script>
-            <script nonce="${nonce}" src="${s}/core/grid-core.js"></script>
-            <script nonce="${nonce}" src="${s}/core/grid.js"></script>
-            <script nonce="${nonce}" src="${s}/core/app-shell.js"></script>
             <script nonce="${nonce}" src="${s}/csv.js"></script>
             <script nonce="${nonce}" type="text/javascript">
                 function ignoreState() {
