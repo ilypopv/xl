@@ -5,6 +5,8 @@ import { openExternalLink } from './links';
 import { documentViewManager } from './documentViewManager';
 
 const MAX_STATE_CHARS = 1024 * 1024;
+// Minified bundles produced by scripts/build-webview.js
+const WEBVIEW_DIR = 'dist/webview';
 
 function isSaneState(state: any): boolean {
     if (state === null) {
@@ -34,7 +36,7 @@ export default abstract class BaseDocumentView {
     constructor(context: ExtensionContext, uri: URI) {
         this._uri = uri;
         this._extensionUri = context.extensionUri;
-        this._scriptUri = Utils.joinPath(context.extensionUri, 'out');
+        this._scriptUri = Utils.joinPath(context.extensionUri, WEBVIEW_DIR);
         this._storage = context.workspaceState;
         documentViewManager.add(this);
     }
@@ -45,7 +47,7 @@ export default abstract class BaseDocumentView {
             enableScripts: true,
             enableFindWidget: false,
             retainContextWhenHidden: true,
-            localResourceRoots: [Utils.joinPath(this._extensionUri, 'out')]
+            localResourceRoots: [Utils.joinPath(this._extensionUri, WEBVIEW_DIR)]
         });
         return this.attachWebviewPanel(panel);
     }
@@ -55,9 +57,16 @@ export default abstract class BaseDocumentView {
         this.bindPanel(webviewPanel);
         webviewPanel.webview.options = {
             enableScripts: true,
-            localResourceRoots: [Utils.joinPath(this._extensionUri, 'out')]
+            localResourceRoots: [Utils.joinPath(this._extensionUri, WEBVIEW_DIR)]
         };
         return this;
+    }
+
+    protected allowLocalRoots(extra: URI[]) {
+        this._panel.webview.options = {
+            enableScripts: true,
+            localResourceRoots: [Utils.joinPath(this._extensionUri, WEBVIEW_DIR), ...extra]
+        };
     }
 
     public initialize() {
@@ -134,14 +143,14 @@ export default abstract class BaseDocumentView {
         this.bindPanel(value);
         value.webview.options = {
             enableScripts: true,
-            localResourceRoots: [Utils.joinPath(this._extensionUri, 'out')]
+            localResourceRoots: [Utils.joinPath(this._extensionUri, WEBVIEW_DIR)]
         };
     }
 
     private bindPanel(panel: WebviewPanel) {
         this._panel = panel;
         this._previewUri = panel.webview.asWebviewUri(this._uri);
-        this._scriptUri = panel.webview.asWebviewUri(Utils.joinPath(this._extensionUri, 'out'));
+        this._scriptUri = panel.webview.asWebviewUri(Utils.joinPath(this._extensionUri, WEBVIEW_DIR));
         panel.onDidDispose(
             () => {
                 this.dispose();
