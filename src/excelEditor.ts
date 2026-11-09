@@ -58,7 +58,7 @@ export class ExcelEditorProvider implements vscode.CustomEditorProvider<ExcelDoc
         openContext: { backupId?: string },
         _token: vscode.CancellationToken
     ): Promise<ExcelDocument> {
-        const document: ExcelDocument = await ExcelDocument.create(uri, openContext.backupId, {
+        const document: ExcelDocument = ExcelDocument.create(uri, openContext.backupId, {
             getFileData: async token => {
                 const view =
                     document.lastView && !document.lastView.isDisposed
@@ -136,15 +136,16 @@ interface ExcelDocumentDelegate {
 }
 
 export class ExcelDocument extends Disposable implements vscode.CustomDocument {
-    static async create(
-        uri: vscode.Uri,
-        backupId: string | undefined,
-        delegate: ExcelDocumentDelegate
-    ): Promise<ExcelDocument | PromiseLike<ExcelDocument>> {
+    // The file is read while the webview boots; consumers of documentData wait for `ready`.
+    static create(uri: vscode.Uri, backupId: string | undefined, delegate: ExcelDocumentDelegate): ExcelDocument {
         const dataFile = typeof backupId === 'string' ? vscode.Uri.parse(backupId) : uri;
-        const fileData = await ExcelDocument.readFile(dataFile);
-        return new ExcelDocument(uri, fileData, delegate);
+        const doc = new ExcelDocument(uri, ExcelDocument.readFile(dataFile), delegate);
+        doc.restored = typeof backupId === 'string';
+        return doc;
     }
+
+    // true when the model was restored from a hot-exit backup, so the disk file is not the content to show
+    public restored = false;
 
     private static async readFile(uri: vscode.Uri): Promise<Uint8Array> {
         if (uri.scheme === 'untitled') {
@@ -158,17 +159,24 @@ export class ExcelDocument extends Disposable implements vscode.CustomDocument {
         return this._uri;
     }
 
-    private _documentData: Uint8Array;
+    private _documentData: Uint8Array = new Uint8Array();
+    private _ready: Promise<void>;
+    public get ready(): Promise<void> {
+        return this._ready;
+    }
     public get documentData(): Uint8Array {
         return this._documentData;
     }
 
     private readonly _delegate: ExcelDocumentDelegate;
 
-    private constructor(uri: vscode.Uri, initialContent: Uint8Array, delegate: ExcelDocumentDelegate) {
+    private constructor(uri: vscode.Uri, initialContent: Promise<Uint8Array>, delegate: ExcelDocumentDelegate) {
         super();
         this._uri = uri;
-        this._documentData = initialContent;
+        this._ready = initialContent.then(data => {
+            this._documentData = data;
+        });
+        this._ready.catch(() => undefined);
         this._delegate = delegate;
         this.watch();
     }
@@ -232,6 +240,7 @@ export class ExcelDocument extends Disposable implements vscode.CustomDocument {
 
     // Reloads a clean document when the file changes on disk; a dirty one only warns, it never loses edits.
     private async diskChanged() {
+        await this._ready;
         const disk = await ExcelDocument.readFile(this._uri);
         if (sameBytes(disk, this._documentData)) {
             return;
@@ -291,6 +300,7 @@ export class ExcelDocument extends Disposable implements vscode.CustomDocument {
     async revert(_cancellation: vscode.CancellationToken): Promise<void> {
         const diskContent = await ExcelDocument.readFile(this.uri);
         this._documentData = diskContent;
+        this._ready = Promise.resolve();
         this._dirty = false;
         this._onDidChangeDocument.fire({
             content: diskContent
