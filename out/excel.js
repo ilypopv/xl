@@ -284,6 +284,7 @@ function initPage() {
                 setCancel(null);
                 if (!p) p = newProvider(sh);
                 providers.set(i, p);
+                if (!readOnly) setTimeout(() => ensureEdit().catch(() => undefined), 0);
                 if (shell.provider === p) {
                     shell.grid.invalidate();
                     shell.layoutPics();
@@ -318,6 +319,13 @@ function initPage() {
             sendMessage({ error: 'xl: ' + why });
             return;
         }
+        console.log(
+            '[xl] workbook parsed ' +
+                Math.round(performance.now() - window.oxExcel.t0) +
+                ' ms after start, ' +
+                nbytes.length +
+                ' bytes'
+        );
         bytes = nbytes;
         wb = nb;
         if (loadCtl) {
@@ -461,8 +469,44 @@ function initPage() {
         return n;
     }
 
+    // the formula engine and the writer are a separate script, fetched once editing is possible
+    let editReady = null;
+    function hasEditModule() {
+        return !!(OX.Calc && OX.patchXlsx);
+    }
+    function ensureEdit() {
+        if (hasEditModule()) return Promise.resolve();
+        if (!editReady)
+            editReady = new Promise(function (resolve, reject) {
+                const s = document.createElement('script');
+                s.src = options.editScript;
+                s.onload = function () {
+                    resolve();
+                };
+                s.onerror = function () {
+                    editReady = null;
+                    reject(new Error('Cannot load the editing module'));
+                };
+                document.head.appendChild(s);
+            });
+        return editReady;
+    }
+
     function applyEdits(edits, source) {
         if (readOnly || !wb) return;
+        if (!hasEditModule()) {
+            shell.setMessage('Loading editor...');
+            ensureEdit().then(
+                function () {
+                    applyEdits(edits, source);
+                },
+                function (err) {
+                    shell.setMessage('Edit failed: ' + (err && err.message ? err.message : err));
+                    shell.grid.refresh();
+                }
+            );
+            return;
+        }
         const p = shell.provider,
             si = active,
             items = [];
@@ -561,16 +605,48 @@ function initPage() {
         }
     }
 
+    function getBytesAsync() {
+        let dirty = false;
+        providers.forEach(function (p) {
+            if (p.dirty) dirty = true;
+        });
+        return (dirty ? ensureEdit() : Promise.resolve()).then(getBytes);
+    }
+
     window.oxExcel = {
         load: load,
         undo: undo,
         redo: redo,
-        getBytes: getBytes
+        getBytes: getBytes,
+        getBytesAsync: getBytesAsync
     };
 
     createShell();
     shell.setMessage('Opening...');
-    vscode.postMessage({ refresh: true });
+    const t0 = performance.now();
+    window.oxExcel.t0 = t0;
+    if (options.directUrl) {
+        // read the file straight from disk; any failure falls back to the host round trip
+        fetch(options.directUrl, { cache: 'no-store' })
+            .then(function (r) {
+                if (!r.ok) throw new Error('HTTP ' + r.status);
+                return r.arrayBuffer();
+            })
+            .then(
+                function (buf) {
+                    return new Uint8Array(buf);
+                },
+                function () {
+                    return null;
+                }
+            )
+            .then(function (u8) {
+                if (u8) {
+                    console.log('[xl] file fetched in ' + Math.round(performance.now() - t0) + ' ms');
+                    load(u8);
+                } else vscode.postMessage({ refresh: true });
+            });
+    } else vscode.postMessage({ refresh: true });
 }
 
 function handleEvents() {
@@ -580,15 +656,18 @@ function handleEvents() {
         if (!app) return;
         if (d.refresh) app.load(d.content);
         else if (d.type === 'getData') {
-            let body,
-                error = null;
-            try {
-                body = app.getBytes();
-            } catch (err) {
-                error = (err && err.message) || String(err);
-            }
-            if (error !== null) sendMessage({ response: true, requestId: d.requestId, error: error });
-            else sendMessage({ response: true, requestId: d.requestId, body: body });
+            app.getBytesAsync().then(
+                function (body) {
+                    sendMessage({ response: true, requestId: d.requestId, body: body });
+                },
+                function (err) {
+                    sendMessage({
+                        response: true,
+                        requestId: d.requestId,
+                        error: (err && err.message) || String(err)
+                    });
+                }
+            );
         } else if (d.undo) app.undo();
         else if (d.redo) app.redo();
         else if (d.content && !d.type) app.load(d.content);
