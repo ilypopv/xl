@@ -46,7 +46,7 @@ module.exports = [
         rules: { 'no-unused-vars': ['warn', { args: 'none', caughtErrors: 'none', vars: 'local' }] }
     },
     {
-        files: ['test/**/*.js', 'webpack.config.js', 'eslint.config.js'],
+        files: ['test/**/*.js', 'scripts/**/*.js', 'webpack.config.js', 'eslint.config.js'],
         languageOptions: {
             ecmaVersion: 2022,
             sourceType: 'commonjs',

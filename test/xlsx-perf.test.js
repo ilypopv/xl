@@ -8,7 +8,11 @@ require('../out/core/format.js');
 require('../out/core/xlsx-provider.js');
 const F = require('./helpers/xlsx-fixtures.js');
 
-const sstOf = arr => ({ length: arr.length, get: i => (i >= 0 && i < arr.length ? arr[i] : '') });
+const sstOf = arr => ({
+    length: arr.length,
+    has: i => i >= 0 && i < arr.length,
+    get: i => (i >= 0 && i < arr.length ? arr[i] : '')
+});
 const ctx = () => ({ sst: sstOf(['alpha', 'beta & gamma', '', 'a long shared string value']), resolve: () => null });
 
 function snapshot(sh) {
@@ -200,4 +204,74 @@ test('memory: compact store stays far below object-per-cell cost', () => {
     const per = (h1.heapUsed - h0.heapUsed + (h1.arrayBuffers - h0.arrayBuffers)) / sh.store.n;
     assert.equal(sh.store.n, 300000);
     if (global.gc) assert.ok(per < 40, 'bytes per cell ' + per);
+});
+
+test('lazy sharedStrings index equals the eager one across tiny inflate chunks', () => {
+    const items = [];
+    for (let i = 0; i < 400; i++) {
+        if (i % 17 === 0)
+            items.push({ raw: '' }); // <si></si> style empty entry
+        else if (i % 13 === 0)
+            items.push({ raw: '<r><t>rich </t></r><r><t xml:space="preserve">text ' + i + '</t></r>' });
+        else if (i % 11 === 0) items.push({ raw: '<t>ph</t><rPh sb="0" eb="1"><t>x</t></rPh>' });
+        else items.push('Zażółć gęślą jaźń 日本語 😀 ' + i + ' & <b> ' + 'x'.repeat(i % 50));
+    }
+    const rows = [];
+    for (let r = 0; r < 420; r++) rows.push(`<row r="${r + 1}"><c r="A${r + 1}" t="s"><v>${r}</v></c></row>`);
+    const buf = F.buildPackage({
+        sheets: [{ name: 'S', xml: F.sheetXml({ data: rows.join('') }) }],
+        sst: F.sst(items),
+        level: 6
+    });
+    const eager = OX.readXlsx(buf, { limits: { lazySst: Infinity } }).loadSheet(0);
+    for (const chunk of [1, 3, 64, 500]) {
+        const wb = OX.readXlsx(buf, { limits: { lazySst: 0, sstChunk: chunk } });
+        assert.equal(snapshot(wb.loadSheet(0)), snapshot(eager), 'chunk ' + chunk);
+    }
+});
+
+test('lazy sharedStrings enforce the inflate cap while streaming', () => {
+    const items = [];
+    for (let i = 0; i < 5000; i++) items.push('s' + i + 'x'.repeat(200));
+    const buf = F.buildPackage({
+        sheets: [{ name: 'S', xml: F.sheetXml({ data: '<row r="1"><c r="A1" t="s"><v>4999</v></c></row>' }) }],
+        sst: F.sst(items),
+        level: 6
+    });
+    const wb = OX.readXlsx(buf, { limits: { lazySst: 0, sstChunk: 256, ratio: 2, ratioMin: 1000 } });
+    assert.throws(
+        () => wb.loadSheet(0),
+        e => e.code === 'ZIPBOMB'
+    );
+});
+
+test('native inflate path: same sheet as the fflate path', async () => {
+    const bytes = bigBook(8000);
+    const ref = OX.readXlsx(bytes, { limits: { nativeInflate: Infinity } }).loadSheet(0);
+    const seen = [];
+    const sh = await OX.readXlsx(bytes, { limits: { nativeInflate: 0 } }).loadSheetAsync(0, {
+        onProgress: i => seen.push(i.fraction)
+    });
+    assert.equal(snapshot(sh), snapshot(ref));
+    assert.equal(sh.partial, false);
+    assert.equal(seen[seen.length - 1], 1);
+    assert.ok(seen.every(f => f >= 0 && f <= 1));
+});
+
+test('native inflate path: bomb rule, corrupt data and cancel', async () => {
+    const bytes = bigBook(8000);
+    await assert.rejects(
+        OX.readXlsx(bytes, { limits: { nativeInflate: 0, ratio: 2, ratioMin: 200000 } }).loadSheetAsync(0),
+        e => e.code === 'ZIPBOMB'
+    );
+    const bad = bytes.slice();
+    bad.fill(0xff, Math.floor(bad.length * 0.4), Math.floor(bad.length * 0.6));
+    const wb = OX.readXlsx(bad, { limits: { nativeInflate: 0 } });
+    await assert.rejects(wb.loadSheetAsync(0));
+    const ac = new AbortController();
+    const wb2 = OX.readXlsx(bigBook(60000), { limits: { nativeInflate: 0 } });
+    await assert.rejects(wb2.loadSheetAsync(0, { signal: ac.signal, onProgress: () => ac.abort() }), {
+        name: 'AbortError'
+    });
+    assert.equal((await wb2.loadSheetAsync(0)).rowCount, 60000);
 });

@@ -7,6 +7,9 @@ test/**
 tsconfig.json
 webpack.config.js
 data/**
+out/**
+!out/vendor/LICENSE.*
+scripts/**
 node_modules/**
 CLAUDE.md
 *_REPORT.md
