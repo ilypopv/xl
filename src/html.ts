@@ -27,7 +27,7 @@ export function makeNonce(): string {
 }
 
 export function csp(cspSource: string, nonce: string): string {
-    return `default-src 'none'; style-src ${cspSource} 'unsafe-inline'; script-src ${cspSource} 'nonce-${nonce}'; img-src ${cspSource} data:; font-src ${cspSource};`;
+    return `default-src 'none'; style-src ${cspSource} 'unsafe-inline'; script-src ${cspSource} 'nonce-${nonce}'; img-src ${cspSource} data:; font-src ${cspSource}; connect-src ${cspSource};`;
 }
 
 export function cleanString(v: any, fallback: string, maxLen: number, minLen = 1): string {
