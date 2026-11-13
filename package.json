@@ -2,7 +2,7 @@
   "name": "xl",
   "displayName": "xl",
   "description": "View and edit CSV, TSV and XLSX files in VS Code.",
-  "version": "1.0.1",
+  "version": "1.1.1",
   "publisher": "ilypopv",
   "icon": "img/icon.png",
   "author": {
@@ -12,12 +12,12 @@
   "license": "SEE LICENSE IN LICENSE",
   "repository": {
     "type": "git",
-    "url": "https://github.com/ilypopv/xl.git"
+    "url": "https://github.com/vs-office/xl.git"
   },
   "bugs": {
-    "url": "https://github.com/ilypopv/xl/issues"
+    "url": "https://github.com/vs-office/xl/issues"
   },
-  "homepage": "https://github.com/ilypopv/xl#readme",
+  "homepage": "https://github.com/vs-office/xl#readme",
   "engines": {
     "vscode": "^1.63.0"
   },
